@@ -8,6 +8,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using System.IO;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace GenesysSftpService.Services;
 
@@ -61,22 +62,16 @@ public class GenesysRecordingDownloader : IRecordingDownloader
 public class RecordingWorker : BackgroundService
 {
     private readonly ILogger<RecordingWorker> _logger;
-    private readonly Models.AppDbContext _db;
-    private readonly IRecordingDownloader _downloader;
-    private readonly ISftpUploader _uploader;
+    private readonly IServiceProvider _serviceProvider;
     private readonly ProcessingOptions _options;
 
     public RecordingWorker(
         ILogger<RecordingWorker> logger,
-        Models.AppDbContext db,
-        IRecordingDownloader downloader,
-        ISftpUploader uploader,
+        IServiceProvider serviceProvider,
         IOptions<ProcessingOptions> options)
     {
         _logger = logger;
-        _db = db;
-        _downloader = downloader;
-        _uploader = uploader;
+        _serviceProvider = serviceProvider;
         _options = options.Value;
     }
 
@@ -100,16 +95,21 @@ public class RecordingWorker : BackgroundService
 
     public async Task ProcessOnce(CancellationToken cancellationToken)
     {
+        using var scope = _serviceProvider.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<GenesysSftpService.Models.AppDbContext>();
+        var downloader = scope.ServiceProvider.GetRequiredService<IRecordingDownloader>();
+        var uploader = scope.ServiceProvider.GetRequiredService<ISftpUploader>();
+
         var today = DateOnly.FromDateTime(DateTime.UtcNow);
         var start = today.ToDateTime(TimeOnly.MinValue);
         var end = today.ToDateTime(TimeOnly.MaxValue);
 
-        var eligibleIds = await _db.GenesysConvDivs
+        var eligibleIds = await db.GenesysConvDivs
             .Where(x => x.DivisionId == _options.DivisionId)
             .Select(x => x.ConversationId)
             .ToListAsync(cancellationToken);
 
-        var conversations = await _db.GenesysConversations
+        var conversations = await db.GenesysConversations
             .Where(c => eligibleIds.Contains(c.ConversationId)
                         && !c.IsPosted
                         && c.ConversationEnd >= start
@@ -122,17 +122,17 @@ public class RecordingWorker : BackgroundService
             cancellationToken.ThrowIfCancellationRequested();
             try
             {
-                var result = await _downloader.DownloadAsync(convo.ConversationId, cancellationToken);
+                var result = await downloader.DownloadAsync(convo.ConversationId, cancellationToken);
                 if (result == null)
                 {
                     _logger.LogWarning("No file downloaded for conversation {ConversationId}", convo.ConversationId);
                     continue;
                 }
 
-                await _uploader.UploadAsync(result.Value.filePath, "/", cancellationToken);
+                await uploader.UploadAsync(result.Value.filePath, "/", cancellationToken);
 
                 convo.IsPosted = true;
-                await _db.SaveChangesAsync(cancellationToken);
+                await db.SaveChangesAsync(cancellationToken);
 
                 _logger.LogInformation("Conversation {ConversationId} posted and updated.", convo.ConversationId);
             }
