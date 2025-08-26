@@ -1,0 +1,38 @@
+@{
+    ViewData["Title"] = "Health";
+}
+
+<div class="container">
+    <h2>Service Health</h2>
+    <p>Recent log tail:</p>
+    <pre style="max-height:400px;overflow:auto;">
+@{
+    try
+    {
+        var logDir = System.IO.Path.Combine(System.IO.Directory.GetCurrentDirectory(), "logs");
+        var file = System.IO.Directory.Exists(logDir) ? System.IO.Directory
+            .GetFiles(logDir, "log-*.log")
+            .OrderByDescending(f => f)
+            .FirstOrDefault() : null;
+        if (file != null)
+        {
+            var lines = System.IO.File.ReadLines(file).TakeLast(200);
+            foreach (var line in lines)
+            {
+                @line
+                <text>\n</text>
+            }
+        }
+        else
+        {
+            <text>No log file yet.</text>
+        }
+    }
+    catch (Exception ex)
+    {
+        <text>@ex.Message</text>
+    }
+}
+    </pre>
+</div>
+
