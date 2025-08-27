@@ -4,6 +4,26 @@
 
 <div class="container">
     <h2>Service Health</h2>
+
+    <div class="mb-3">
+        <strong>Files posted today:</strong> @ViewData["PostedCount"]
+    </div>
+
+    <div class="mb-3">
+        @if (TempData["Msg"] != null)
+        {
+            <div class="alert alert-info">@TempData["Msg"]</div>
+        }
+        <form method="post" action="/health/download" class="row g-2">
+            <div class="col-auto">
+                <input name="callId" class="form-control" placeholder="Enter Call ID" />
+            </div>
+            <div class="col-auto">
+                <button class="btn btn-primary" type="submit">Download & Post</button>
+            </div>
+        </form>
+    </div>
+
     <p>Recent log tail:</p>
     <pre style="max-height:400px;overflow:auto;">
 @{

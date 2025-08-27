@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("GenesysSftpService")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+c770a6b121056a6ac5117d962585ec8cdc1d774d")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+b42e232679188fe2bc3390ef0be2cb2bd3925d4f")]
 [assembly: System.Reflection.AssemblyProductAttribute("GenesysSftpService")]
 [assembly: System.Reflection.AssemblyTitleAttribute("GenesysSftpService")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]
