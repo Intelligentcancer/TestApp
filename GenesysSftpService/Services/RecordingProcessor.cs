@@ -9,6 +9,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using System.IO;
 using Microsoft.Extensions.DependencyInjection;
+using System.Globalization;
 
 namespace GenesysSftpService.Services;
 
@@ -129,7 +130,14 @@ public class RecordingWorker : BackgroundService
                     continue;
                 }
 
-                await uploader.UploadAsync(result.Value.filePath, "/", cancellationToken);
+                // Build destination path based on ConversationEnd: "Call Recordings/YYYY/MM-MMM"
+                var endTime = convo.ConversationEnd;
+                var year = endTime.Year;
+                var monthAbbrev = CultureInfo.InvariantCulture.DateTimeFormat.GetAbbreviatedMonthName(endTime.Month);
+                var monthFolder = $"{endTime.Month:D2}-{monthAbbrev}";
+                var destinationFolder = $"Call Recordings/{year}/{monthFolder}";
+
+                await uploader.UploadAsync(result.Value.filePath, destinationFolder, cancellationToken);
 
                 convo.IsPosted = true;
                 await db.SaveChangesAsync(cancellationToken);
