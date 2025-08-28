@@ -48,25 +48,30 @@ public class HealthController : Controller
 
         try
         {
-            var result = await _downloader.DownloadAsync(callId.Trim(), HttpContext.RequestAborted);
+            var trimmed = callId.Trim();
+            using var cts = new System.Threading.CancellationTokenSource(TimeSpan.FromMinutes(5));
+            var token = cts.Token;
+
+            var convo = await _db.GenesysConversations.FirstOrDefaultAsync(c => c.ConversationId == trimmed, token);
+
+            var result = await _downloader.DownloadAsync(trimmed, token);
             if (result == null)
             {
                 TempData["Msg"] = "Download failed.";
                 return RedirectToAction(nameof(Index));
             }
 
-            // Determine destination using today's date
-            var now = DateTime.UtcNow;
-            var monthAbbrev = System.Globalization.CultureInfo.InvariantCulture.DateTimeFormat.GetAbbreviatedMonthName(now.Month);
-            var destinationFolder = $"Call Recordings/{now.Year}/{now.Month:D2}-{monthAbbrev}";
-            await _uploader.UploadAsync(result.Value.filePath, destinationFolder, HttpContext.RequestAborted);
+            // Determine destination using conversation end if available, else now
+            var stamp = convo?.ConversationEnd ?? DateTime.UtcNow;
+            var monthAbbrev = System.Globalization.CultureInfo.InvariantCulture.DateTimeFormat.GetAbbreviatedMonthName(stamp.Month);
+            var destinationFolder = $"Call Recordings/{stamp.Year}/{stamp.Month:D2}-{monthAbbrev}";
+            await _uploader.UploadAsync(result.Value.filePath, destinationFolder, token);
 
             // Mark as posted if present
-            var convo = await _db.GenesysConversations.FirstOrDefaultAsync(c => c.ConversationId == callId);
             if (convo != null)
             {
                 convo.IsPosted = true;
-                await _db.SaveChangesAsync();
+                await _db.SaveChangesAsync(token);
             }
             TempData["Msg"] = "Recording downloaded and posted.";
         }
