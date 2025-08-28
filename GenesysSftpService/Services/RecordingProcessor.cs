@@ -139,6 +139,16 @@ public class RecordingWorker : BackgroundService
 
                 await uploader.UploadAsync(result.Value.filePath, destinationFolder, cancellationToken);
 
+                try
+                {
+                    if (File.Exists(result.Value.filePath))
+                        File.Delete(result.Value.filePath);
+                }
+                catch (Exception delEx)
+                {
+                    _logger.LogWarning(delEx, "Failed to delete local file {Path}", result.Value.filePath);
+                }
+
                 convo.IsPosted = true;
                 await db.SaveChangesAsync(cancellationToken);
 

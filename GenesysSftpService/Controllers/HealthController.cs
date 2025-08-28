@@ -67,6 +67,16 @@ public class HealthController : Controller
             var destinationFolder = $"Call Recordings/{stamp.Year}/{stamp.Month:D2}-{monthAbbrev}";
             await _uploader.UploadAsync(result.Value.filePath, destinationFolder, token);
 
+            try
+            {
+                if (System.IO.File.Exists(result.Value.filePath))
+                    System.IO.File.Delete(result.Value.filePath);
+            }
+            catch (Exception delEx)
+            {
+                // Best-effort delete
+            }
+
             // Mark as posted if present
             if (convo != null)
             {
