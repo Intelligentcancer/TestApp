@@ -11,18 +11,18 @@ builder.Host.UseNLog();
 builder.Services.AddControllersWithViews();
 
 // Configuration options
-builder.Services.Configure<GenesysSftpService.Services.ProcessingOptions>(builder.Configuration.GetSection("Processing"));
-builder.Services.Configure<GenesysSftpService.Services.SftpOptions>(builder.Configuration.GetSection("Sftp"));
+builder.Services.Configure<GenesysRecordingPostingUtility.Services.ProcessingOptions>(builder.Configuration.GetSection("Processing"));
+builder.Services.Configure<GenesysRecordingPostingUtility.Services.SftpOptions>(builder.Configuration.GetSection("Sftp"));
 builder.Services.Configure<GenesysSftpService.Controllers.BasicAuthOptions>(builder.Configuration.GetSection("Auth"));
 
 // EF Core
-builder.Services.AddDbContext<GenesysSftpService.Models.AppDbContext>(options =>
+builder.Services.AddDbContext<GenesysRecordingPostingUtility.Models.AppDbContext>(options =>
     options.UseSqlServer(builder.Configuration.GetConnectionString("DefaultConnection")));
 
 // Services
-builder.Services.AddScoped<GenesysSftpService.Services.IRecordingDownloader, GenesysSftpService.Services.GenesysRecordingDownloader>();
-builder.Services.AddScoped<GenesysSftpService.Services.ISftpUploader, GenesysSftpService.Services.WinScpSftpUploader>();
-builder.Services.AddHostedService<GenesysSftpService.Services.RecordingWorker>();
+builder.Services.AddScoped<GenesysRecordingPostingUtility.Services.IRecordingDownloader, GenesysRecordingPostingUtility.Services.GenesysRecordingDownloader>();
+builder.Services.AddScoped<GenesysRecordingPostingUtility.Services.ISftpUploader, GenesysRecordingPostingUtility.Services.WinScpSftpUploader>();
+builder.Services.AddHostedService<GenesysRecordingPostingUtility.Services.RecordingWorker>();
 
 // Auth (cookie-based after basic login)
 builder.Services.AddAuthentication(Microsoft.AspNetCore.Authentication.Cookies.CookieAuthenticationDefaults.AuthenticationScheme)

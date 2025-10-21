@@ -3,8 +3,8 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
-using GenesysSftpService.Models;
-using GenesysSftpService.Services;
+using GenesysRecordingPostingUtility.Models;
+using GenesysRecordingPostingUtility.Services;
 
 namespace GenesysSftpService.Controllers;
 
@@ -31,7 +31,7 @@ public class HealthController : Controller
         var start = today.ToDateTime(TimeOnly.MinValue);
         var end = today.ToDateTime(TimeOnly.MaxValue);
         var postedCount = await _db.GenesysConversations
-            .Where(c => c.IsPosted && c.ConversationEnd >= start && c.ConversationEnd <= end)
+            .Where(c => c.isPosted == 1 && c.ConversationEnd >= start && c.ConversationEnd <= end)
             .CountAsync();
         ViewData["PostedCount"] = postedCount;
         return View();
@@ -52,9 +52,9 @@ public class HealthController : Controller
             using var cts = new System.Threading.CancellationTokenSource(TimeSpan.FromMinutes(5));
             var token = cts.Token;
 
-            var convo = await _db.GenesysConversations.FirstOrDefaultAsync(c => c.ConversationId == trimmed, token);
+            var convo = await _db.GenesysConversations.FirstOrDefaultAsync(c => c.CallId == trimmed, token);
 
-            var result = await _downloader.DownloadAsync(trimmed, token);
+            var result = await _downloader.DownloadAsync(trimmed, convo?.ConversationEnd, token);
             if (result == null)
             {
                 TempData["Msg"] = "Download failed.";
@@ -80,7 +80,7 @@ public class HealthController : Controller
             // Mark as posted if present
             if (convo != null)
             {
-                convo.IsPosted = true;
+                convo.isPosted = 1;
                 await _db.SaveChangesAsync(token);
             }
             TempData["Msg"] = "Recording downloaded and posted.";

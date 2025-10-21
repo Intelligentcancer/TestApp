@@ -6,15 +6,17 @@ using PureCloudPlatform.Client.V2.Client;
 using PureCloudPlatform.Client.V2.Extensions;
 using PureCloudPlatform.Client.V2.Model;
 using System;
+using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Net;
-using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Globalization;
+using System.Text;
 using PC = PureCloudPlatform.Client.V2.Client;
 using Microsoft.Extensions.DependencyInjection;
-using System.Globalization;
 
 namespace GenesysRecordingPostingUtility.Services
 {
@@ -26,6 +28,9 @@ namespace GenesysRecordingPostingUtility.Services
         public string GenesysApiSecret { get; set; } = string.Empty;
         public string GenesysRegion { get; set; } = string.Empty;
         public string GenesysRecordingPath { get; set; } = ".";
+        public bool ScreenRecordingEnabled { get; set; } = false;
+        public string FfmpegPath { get; set; } = "ffmpeg";
+        public string GenesysRecordingTempDir { get; set; } = "/tmp/genesys-recording-tmp";
     }
 
     public interface IRecordingDownloader
@@ -42,11 +47,13 @@ namespace GenesysRecordingPostingUtility.Services
     {
         private readonly ILogger<GenesysRecordingDownloader> _logger;
         private readonly ProcessingOptions _options;
+        private readonly ISftpUploader _uploader;
 
-        public GenesysRecordingDownloader(ILogger<GenesysRecordingDownloader> logger, IOptions<ProcessingOptions> options)
+        public GenesysRecordingDownloader(ILogger<GenesysRecordingDownloader> logger, IOptions<ProcessingOptions> options, ISftpUploader uploader)
         {
             _logger = logger;
             _options = options.Value;
+            _uploader = uploader;
         }
 
         public async Task<(string filePath, string fileName)?> DownloadAsync(string callId, DateTime? conversationEnd, CancellationToken cancellationToken)
@@ -90,7 +97,7 @@ namespace GenesysRecordingPostingUtility.Services
                                 Thread.Sleep(5000);
                             }
                         }
-                        if (recordings != null)
+                            if (recordings != null)
                         {
                             if (recordings.MediaUris?.Count > 0)
                             {
@@ -100,6 +107,70 @@ namespace GenesysRecordingPostingUtility.Services
                                     _logger.LogInformation("going to download audio recording Conversation ID : {ConversationId} and Recording ID : {RecordingId} with URI : {URI}", item.ConversationId, item.RecordingId, uri);
                                     DownloadRecording(uri, item.ConversationId, conversationEnd, item.RecordingId, wc,
                                     out filepath, out filename);
+                                }
+                                else if (_options.ScreenRecordingEnabled && string.Equals(recordings.Media, "screen", StringComparison.OrdinalIgnoreCase))
+                                {
+                                    try
+                                    {
+                                        Directory.CreateDirectory(_options.GenesysRecordingTempDir ?? "/tmp");
+                                        Directory.CreateDirectory(_options.GenesysRecordingPath ?? ".");
+
+                                        var orderedUris = recordings.MediaUris
+                                            .OrderBy(kvp => kvp.Key)
+                                            .Select(kvp => new Uri(kvp.Value.MediaUri))
+                                            .ToList();
+
+                                        var segmentFiles = new List<string>();
+                                        string extension = null;
+                                        foreach (var segUri in orderedUris)
+                                        {
+                                            extension ??= GetExtension(segUri);
+                                            if (string.IsNullOrWhiteSpace(extension)) extension = ".mp4";
+                                            var tempName = $"{item.ConversationId}_{item.RecordingId}_{segmentFiles.Count:D3}{extension}";
+                                            var tempPath = Path.Combine(_options.GenesysRecordingTempDir, tempName);
+                                            if (!File.Exists(tempPath))
+                                            {
+                                                wc.DownloadFile(segUri, tempPath);
+                                            }
+                                            segmentFiles.Add(tempPath);
+                                        }
+
+                                        string safeDate = conversationEnd.HasValue ? conversationEnd.Value.ToString("yyyy-MM-dd_HH-mm-ss") : "NoDate";
+                                        var outputName = $"{safeDate}_{item.ConversationId}_{item.RecordingId}_screen_merged{extension}";
+                                        var outputPath = Path.Combine(_options.GenesysRecordingPath, outputName);
+
+                                        var listFilePath = Path.Combine(_options.GenesysRecordingTempDir, $"temp_{Guid.NewGuid():N}.txt");
+                                        await File.WriteAllLinesAsync(listFilePath, segmentFiles.Select(p => $"file '{p.Replace("\\", "/")}'"), cancellationToken);
+
+                                        var ffmpegArgs = $"-y -f concat -safe 0 -i \"{listFilePath}\" -c copy \"{outputPath}\"";
+                                        var success = RunFfmpeg(ffmpegArgs, _options.FfmpegPath);
+
+                                        try { if (File.Exists(listFilePath)) File.Delete(listFilePath); } catch { }
+                                        foreach (var seg in segmentFiles)
+                                        {
+                                            try { if (File.Exists(seg)) File.Delete(seg); } catch { }
+                                        }
+
+                                        if (success)
+                                        {
+                                            var endTime = conversationEnd ?? DateTime.UtcNow;
+                                            var year = endTime.Year;
+                                            var monthAbbrev = System.Globalization.CultureInfo.InvariantCulture.DateTimeFormat.GetAbbreviatedMonthName(endTime.Month);
+                                            var monthFolder = $"{endTime.Month:D2}-{monthAbbrev}";
+                                            var screenFolder = $"/{year}/{monthFolder}_Screen";
+                                            await _uploader.UploadAsync(outputPath, screenFolder, cancellationToken);
+                                            try { if (File.Exists(outputPath)) File.Delete(outputPath); } catch { }
+                                            _logger.LogInformation("Screen recording merged and uploaded for {ConversationId}/{RecordingId}", item.ConversationId, item.RecordingId);
+                                        }
+                                        else
+                                        {
+                                            _logger.LogWarning("FFmpeg merge failed for screen recording {ConversationId}/{RecordingId}", item.ConversationId, item.RecordingId);
+                                        }
+                                    }
+                                    catch (Exception scrEx)
+                                    {
+                                        _logger.LogError(scrEx, "Error handling screen recording for {ConversationId}/{RecordingId}", item.ConversationId, item.RecordingId);
+                                    }
                                 }
                             }
                         }
@@ -118,6 +189,38 @@ namespace GenesysRecordingPostingUtility.Services
             if (string.IsNullOrEmpty(filename) || string.IsNullOrEmpty(filepath))
                 return null;
             return (filepath, filename);
+        }
+
+        private bool RunFfmpeg(string arguments, string ffmpegPath)
+        {
+            try
+            {
+                var startInfo = new ProcessStartInfo
+                {
+                    FileName = string.IsNullOrWhiteSpace(ffmpegPath) ? "ffmpeg" : ffmpegPath,
+                    Arguments = arguments,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                };
+
+                using var process = new Process { StartInfo = startInfo };
+                process.OutputDataReceived += (sender, e) => { if (!string.IsNullOrEmpty(e.Data)) _logger.LogDebug(e.Data); };
+                process.ErrorDataReceived += (sender, e) => { if (!string.IsNullOrEmpty(e.Data)) _logger.LogDebug("FFmpeg: {Msg}", e.Data); };
+                process.Start();
+                process.BeginOutputReadLine();
+                process.BeginErrorReadLine();
+                process.WaitForExit();
+                var exit = process.ExitCode;
+                _logger.LogInformation("FFmpeg exited with code {Code}", exit);
+                return exit == 0;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed running ffmpeg");
+                return false;
+            }
         }
         public BatchDownloadJobSubmission AddConversationRecordingsToBatch(RecordingApi recordingApi,
         IEnumerable<string> conversationIds)
@@ -142,9 +245,16 @@ namespace GenesysRecordingPostingUtility.Services
 
                     if (!string.Equals(recording.Media, "audio", StringComparison.OrdinalIgnoreCase))
                     {
-                        _logger.LogInformation("Skipping non-audio recording: {ConversationId} [{Media}]",
-                            recording.ConversationId, recording.Media);
-                        continue;
+                        if (_options.ScreenRecordingEnabled && string.Equals(recording.Media, "screen", StringComparison.OrdinalIgnoreCase))
+                        {
+                            // Include screen recording when feature is enabled
+                        }
+                        else
+                        {
+                            _logger.LogInformation("Skipping non-audio recording: {ConversationId} [{Media}]",
+                                recording.ConversationId, recording.Media);
+                            continue;
+                        }
                     }
 
                     BatchDownloadRequest batchRequest = new BatchDownloadRequest()
@@ -156,8 +266,8 @@ namespace GenesysRecordingPostingUtility.Services
                     batchDownloadRequestList.Add(batchRequest);
                     batchRequestBody.BatchDownloadRequestList = batchDownloadRequestList;
 
-                    _logger.LogInformation("Added audio recording: {ConversationId} to batch request",
-                        recording.ConversationId);
+                    _logger.LogInformation("Added {Media} recording: {ConversationId} to batch request",
+                        recording.Media, recording.ConversationId);
 
                 }
             }
@@ -173,7 +283,7 @@ namespace GenesysRecordingPostingUtility.Services
      ? conversationEnd.Value.ToString("yyyy-MM-dd_HH-mm-ss")
      : "NoDate";
             filename = safeDate + "_" + conversationId + "_" + recordingId + extension;
-            filePath = path + "\\" + filename;
+            filePath = Path.Combine(path, filename);
             if (!System.IO.File.Exists(filePath))
                 wc.DownloadFile(uri, filePath);
         }
@@ -272,6 +382,8 @@ namespace GenesysRecordingPostingUtility.Services
                     var monthFolder = $"{endTime.Month:D2}-{monthAbbrev}";
                     var destinationFolder = $"/{year}/{monthFolder}";
                     await uploader.UploadAsync(result.Value.filePath, destinationFolder, cancellationToken);
+
+                    // Screen recordings are handled inline in downloader when flag is enabled
                     try
                     {
                         if (File.Exists(result.Value.filePath))
