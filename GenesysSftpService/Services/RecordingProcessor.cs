@@ -6,15 +6,17 @@ using PureCloudPlatform.Client.V2.Client;
 using PureCloudPlatform.Client.V2.Extensions;
 using PureCloudPlatform.Client.V2.Model;
 using System;
+using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Net;
-using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Globalization;
+using System.Text;
 using PC = PureCloudPlatform.Client.V2.Client;
 using Microsoft.Extensions.DependencyInjection;
-using System.Globalization;
 
 namespace GenesysRecordingPostingUtility.Services
 {
@@ -26,11 +28,15 @@ namespace GenesysRecordingPostingUtility.Services
         public string GenesysApiSecret { get; set; } = string.Empty;
         public string GenesysRegion { get; set; } = string.Empty;
         public string GenesysRecordingPath { get; set; } = ".";
+        public bool ScreenRecordingEnabled { get; set; } = false;
+        public string FfmpegPath { get; set; } = "ffmpeg";
+        public string GenesysRecordingTempDir { get; set; } = "/tmp/genesys-recording-tmp";
     }
 
     public interface IRecordingDownloader
     {
         Task<(string filePath, string fileName)?> DownloadAsync(string conversationId, DateTime? conversationEnd, CancellationToken cancellationToken);
+        Task<List<string>> DownloadAndMergeScreensAsync(string conversationId, DateTime? conversationEnd, CancellationToken cancellationToken);
     }
 
     public interface ISftpUploader
@@ -90,7 +96,7 @@ namespace GenesysRecordingPostingUtility.Services
                                 Thread.Sleep(5000);
                             }
                         }
-                        if (recordings != null)
+                            if (recordings != null)
                         {
                             if (recordings.MediaUris?.Count > 0)
                             {
@@ -118,6 +124,133 @@ namespace GenesysRecordingPostingUtility.Services
             if (string.IsNullOrEmpty(filename) || string.IsNullOrEmpty(filepath))
                 return null;
             return (filepath, filename);
+        }
+
+        public async Task<List<string>> DownloadAndMergeScreensAsync(string conversationId, DateTime? conversationEnd, CancellationToken cancellationToken)
+        {
+            var outputFiles = new List<string>();
+            try
+            {
+                PureCloudRegionHosts region = (PureCloudRegionHosts)Enum.Parse(typeof(PureCloudRegionHosts), _options.GenesysRegion);
+                PC.Configuration configuration = new PC.Configuration(new ApiClient());
+                configuration.ApiClient.setBasePath(region);
+                var accessTokenInfo = configuration.ApiClient.PostToken(clientId: _options.GenesysApiUser, clientSecret: _options.GenesysApiSecret);
+                configuration.AccessToken = accessTokenInfo.AccessToken;
+                var recordingApi = new RecordingApi(configuration);
+
+                var recordingsData = recordingApi.GetConversationRecordingmetadata(conversationId);
+                var screenMetas = recordingsData.Where(r => string.Equals(r.Media, "screen", StringComparison.OrdinalIgnoreCase)).ToList();
+                if (screenMetas.Count == 0)
+                {
+                    _logger.LogInformation("No screen recordings for conversation {ConversationId}", conversationId);
+                    return outputFiles;
+                }
+
+                Directory.CreateDirectory(_options.GenesysRecordingTempDir ?? "/tmp");
+                Directory.CreateDirectory(_options.GenesysRecordingPath ?? ".");
+
+                using var wc = new WebClient();
+                foreach (var meta in screenMetas)
+                {
+                    PureCloudPlatform.Client.V2.Model.Recording rec = null;
+                    int retryCount = 0;
+                    while (rec == null && retryCount < 7)
+                    {
+                        rec = recordingApi.GetConversationRecording(conversationId: meta.ConversationId, recordingId: meta.Id, download: true);
+                        if (rec == null)
+                        {
+                            _logger.LogInformation("Attempt : {Attempt} failed to get screen recording for conversation ID : {ConversationId} and Recording ID : {RecordingId}", (retryCount + 1), meta.ConversationId, meta.Id);
+                            retryCount++;
+                            Thread.Sleep(5000);
+                        }
+                    }
+
+                    if (rec?.MediaUris == null || rec.MediaUris.Count == 0)
+                        continue;
+
+                    // Order segments by key for deterministic concatenation
+                    var orderedUris = rec.MediaUris.OrderBy(kvp => kvp.Key).Select(kvp => new Uri(kvp.Value.MediaUri)).ToList();
+                    var segmentFiles = new List<string>();
+                    string extension = null;
+                    foreach (var uri in orderedUris)
+                    {
+                        extension ??= GetExtension(uri);
+                        if (string.IsNullOrWhiteSpace(extension)) extension = ".mp4";
+                        var tempName = $"{conversationId}_{meta.Id}_{segmentFiles.Count:D3}{extension}";
+                        var tempPath = Path.Combine(_options.GenesysRecordingTempDir, tempName);
+                        if (!File.Exists(tempPath))
+                        {
+                            wc.DownloadFile(uri, tempPath);
+                        }
+                        segmentFiles.Add(tempPath);
+                    }
+
+                    string safeDate = conversationEnd.HasValue ? conversationEnd.Value.ToString("yyyy-MM-dd_HH-mm-ss") : "NoDate";
+                    var outputName = $"{safeDate}_{conversationId}_{meta.Id}_screen_merged{extension}";
+                    var outputPath = Path.Combine(_options.GenesysRecordingPath, outputName);
+
+                    // Build ffmpeg concat list
+                    var listFilePath = Path.Combine(_options.GenesysRecordingTempDir, $"temp_{Guid.NewGuid():N}.txt");
+                    await File.WriteAllLinesAsync(listFilePath, segmentFiles.Select(p => $"file '{p.Replace("\\", "/")}'"), Encoding.UTF8, cancellationToken);
+
+                    var ffmpegArgs = $"-y -f concat -safe 0 -i \"{listFilePath}\" -c copy \"{outputPath}\"";
+                    var success = RunFfmpeg(ffmpegArgs, _options.FfmpegPath);
+
+                    try { if (File.Exists(listFilePath)) File.Delete(listFilePath); } catch { }
+                    foreach (var seg in segmentFiles)
+                    {
+                        try { if (File.Exists(seg)) File.Delete(seg); } catch { }
+                    }
+
+                    if (success)
+                    {
+                        outputFiles.Add(outputPath);
+                        _logger.LogInformation("Merged screen recording created at {Path}", outputPath);
+                    }
+                    else
+                    {
+                        _logger.LogWarning("FFmpeg merge failed for screen recording {RecordingId}", meta.Id);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error downloading/merging screen recordings for conversation {ConversationId}", conversationId);
+            }
+
+            return outputFiles;
+        }
+
+        private bool RunFfmpeg(string arguments, string ffmpegPath)
+        {
+            try
+            {
+                var startInfo = new ProcessStartInfo
+                {
+                    FileName = string.IsNullOrWhiteSpace(ffmpegPath) ? "ffmpeg" : ffmpegPath,
+                    Arguments = arguments,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                };
+
+                using var process = new Process { StartInfo = startInfo };
+                process.OutputDataReceived += (sender, e) => { if (!string.IsNullOrEmpty(e.Data)) _logger.LogDebug(e.Data); };
+                process.ErrorDataReceived += (sender, e) => { if (!string.IsNullOrEmpty(e.Data)) _logger.LogDebug("FFmpeg: {Msg}", e.Data); };
+                process.Start();
+                process.BeginOutputReadLine();
+                process.BeginErrorReadLine();
+                process.WaitForExit();
+                var exit = process.ExitCode;
+                _logger.LogInformation("FFmpeg exited with code {Code}", exit);
+                return exit == 0;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed running ffmpeg");
+                return false;
+            }
         }
         public BatchDownloadJobSubmission AddConversationRecordingsToBatch(RecordingApi recordingApi,
         IEnumerable<string> conversationIds)
@@ -173,7 +306,7 @@ namespace GenesysRecordingPostingUtility.Services
      ? conversationEnd.Value.ToString("yyyy-MM-dd_HH-mm-ss")
      : "NoDate";
             filename = safeDate + "_" + conversationId + "_" + recordingId + extension;
-            filePath = path + "\\" + filename;
+            filePath = Path.Combine(path, filename);
             if (!System.IO.File.Exists(filePath))
                 wc.DownloadFile(uri, filePath);
         }
@@ -272,6 +405,29 @@ namespace GenesysRecordingPostingUtility.Services
                     var monthFolder = $"{endTime.Month:D2}-{monthAbbrev}";
                     var destinationFolder = $"/{year}/{monthFolder}";
                     await uploader.UploadAsync(result.Value.filePath, destinationFolder, cancellationToken);
+
+                    // If enabled, also process screen recordings: merge and upload
+                    if (_options.ScreenRecordingEnabled)
+                    {
+                        var screenFiles = await (downloader as GenesysRecordingDownloader)?.DownloadAndMergeScreensAsync(convo.CallId, convo.ConversationEnd, cancellationToken);
+                        if (screenFiles != null && screenFiles.Count > 0)
+                        {
+                            var screenFolder = $"/{year}/{monthFolder}_Screen";
+                            foreach (var screenFile in screenFiles)
+                            {
+                                await uploader.UploadAsync(screenFile, screenFolder, cancellationToken);
+                                try
+                                {
+                                    if (File.Exists(screenFile))
+                                        File.Delete(screenFile);
+                                }
+                                catch (Exception delEx)
+                                {
+                                    _logger.LogWarning(delEx, "Failed to delete local screen file {Path}", screenFile);
+                                }
+                            }
+                        }
+                    }
                     try
                     {
                         if (File.Exists(result.Value.filePath))
