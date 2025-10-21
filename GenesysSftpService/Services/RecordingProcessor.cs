@@ -245,9 +245,16 @@ namespace GenesysRecordingPostingUtility.Services
 
                     if (!string.Equals(recording.Media, "audio", StringComparison.OrdinalIgnoreCase))
                     {
-                        _logger.LogInformation("Skipping non-audio recording: {ConversationId} [{Media}]",
-                            recording.ConversationId, recording.Media);
-                        continue;
+                        if (_options.ScreenRecordingEnabled && string.Equals(recording.Media, "screen", StringComparison.OrdinalIgnoreCase))
+                        {
+                            // Include screen recording when feature is enabled
+                        }
+                        else
+                        {
+                            _logger.LogInformation("Skipping non-audio recording: {ConversationId} [{Media}]",
+                                recording.ConversationId, recording.Media);
+                            continue;
+                        }
                     }
 
                     BatchDownloadRequest batchRequest = new BatchDownloadRequest()
@@ -259,8 +266,8 @@ namespace GenesysRecordingPostingUtility.Services
                     batchDownloadRequestList.Add(batchRequest);
                     batchRequestBody.BatchDownloadRequestList = batchDownloadRequestList;
 
-                    _logger.LogInformation("Added audio recording: {ConversationId} to batch request",
-                        recording.ConversationId);
+                    _logger.LogInformation("Added {Media} recording: {ConversationId} to batch request",
+                        recording.Media, recording.ConversationId);
 
                 }
             }
