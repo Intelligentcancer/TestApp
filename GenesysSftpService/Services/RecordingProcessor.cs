@@ -154,9 +154,9 @@ namespace GenesysRecordingPostingUtility.Services
                                         if (success)
                                         {
                                             var endTime = conversationEnd ?? DateTime.UtcNow;
-                                            var year = endTime.Value.Year;
-                                            var monthAbbrev = System.Globalization.CultureInfo.InvariantCulture.DateTimeFormat.GetAbbreviatedMonthName(endTime.Value.Month);
-                                            var monthFolder = $"{endTime.Value.Month:D2}-{monthAbbrev}";
+                                            var year = endTime.Year;
+                                            var monthAbbrev = System.Globalization.CultureInfo.InvariantCulture.DateTimeFormat.GetAbbreviatedMonthName(endTime.Month);
+                                            var monthFolder = $"{endTime.Month:D2}-{monthAbbrev}";
                                             var screenFolder = $"/{year}/{monthFolder}_Screen";
                                             await _uploader.UploadAsync(outputPath, screenFolder, cancellationToken);
                                             try { if (File.Exists(outputPath)) File.Delete(outputPath); } catch { }
