@@ -31,6 +31,8 @@ namespace GenesysRecordingPostingUtility.Services
         public bool ScreenRecordingEnabled { get; set; } = false;
         public string FfmpegPath { get; set; } = "ffmpeg";
         public string GenesysRecordingTempDir { get; set; } = "/tmp/genesys-recording-tmp";
+        public string ConversationIdsCsvPath { get; set; } = string.Empty;
+        public string[] ConversationIds { get; set; } = Array.Empty<string>();
     }
 
     public interface IRecordingDownloader
@@ -343,25 +345,40 @@ namespace GenesysRecordingPostingUtility.Services
 
 
             var uploader = scope.ServiceProvider.GetRequiredService<ISftpUploader>();
-            //var today = DateOnly.FromDateTime(DateTime.UtcNow);
-            //var start = today.ToDateTime(TimeOnly.MinValue);
-            //var end = today.ToDateTime(TimeOnly.MaxValue);
+            var overrideConversationIds = await GetOverrideConversationIdsAsync(cancellationToken);
 
-            var targetDate = new DateOnly(2025, 10, 20);  // Year, Month, Day
-            var start = targetDate.ToDateTime(TimeOnly.MinValue);
-            var end = targetDate.ToDateTime(TimeOnly.MaxValue);
+            IQueryable<GenesysRecordingPostingUtility.Models.GenesysConversation> conversationsQuery;
+            if (overrideConversationIds.Count > 0)
+            {
+                var overrideIdList = overrideConversationIds.ToList();
+                _logger.LogInformation("Using one-time conversation ID override with {Count} IDs.", overrideIdList.Count);
+                conversationsQuery = db.GenesysConversations
+                    .Where(c => c.isPosted == 0 && overrideIdList.Contains(c.CallId));
+            }
+            else
+            {
+                //var today = DateOnly.FromDateTime(DateTime.UtcNow);
+                //var start = today.ToDateTime(TimeOnly.MinValue);
+                //var end = today.ToDateTime(TimeOnly.MaxValue);
 
-            var eligibleIds = await db.GenesysConvDivs
-                .Where(x => x.DivisionId == _options.DivisionId)
-                .Select(x => x.ConversationId)
-                .ToListAsync(cancellationToken);
+                var targetDate = new DateOnly(2025, 10, 20);  // Year, Month, Day
+                var start = targetDate.ToDateTime(TimeOnly.MinValue);
+                var end = targetDate.ToDateTime(TimeOnly.MaxValue);
 
-            var conversations = await db.GenesysConversations
-                .Where(c => eligibleIds.Contains(c.CallId)
-                          //  && c.AgentID != "ivr"
-                            && c.isPosted == 0
-                            && c.ConversationEnd >= start   
-                            && c.ConversationEnd <= end)
+                var eligibleIds = await db.GenesysConvDivs
+                    .Where(x => x.DivisionId == _options.DivisionId)
+                    .Select(x => x.ConversationId)
+                    .ToListAsync(cancellationToken);
+
+                conversationsQuery = db.GenesysConversations
+                    .Where(c => eligibleIds.Contains(c.CallId)
+                              //  && c.AgentID != "ivr"
+                                && c.isPosted == 0
+                                && c.ConversationEnd >= start
+                                && c.ConversationEnd <= end);
+            }
+
+            var conversations = await conversationsQuery
                 .OrderBy(c => c.ConversationEnd)
                 .ToListAsync(cancellationToken);
 
@@ -404,6 +421,60 @@ namespace GenesysRecordingPostingUtility.Services
                     _logger.LogError(ex, "Failed processing conversation {ConversationId}", convo.CallId);
                 }
             }
+        }
+
+        private async Task<HashSet<string>> GetOverrideConversationIdsAsync(CancellationToken cancellationToken)
+        {
+            var ids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var id in _options.ConversationIds ?? Array.Empty<string>())
+            {
+                if (!string.IsNullOrWhiteSpace(id))
+                {
+                    ids.Add(id.Trim());
+                }
+            }
+
+            if (!string.IsNullOrWhiteSpace(_options.ConversationIdsCsvPath))
+            {
+                var csvPath = _options.ConversationIdsCsvPath.Trim();
+                if (!Path.IsPathRooted(csvPath))
+                {
+                    csvPath = Path.Combine(Directory.GetCurrentDirectory(), csvPath);
+                }
+
+                if (!File.Exists(csvPath))
+                {
+                    _logger.LogWarning("Conversation ID CSV file not found at {CsvPath}", csvPath);
+                    return ids;
+                }
+
+                var lines = await File.ReadAllLinesAsync(csvPath, cancellationToken);
+                foreach (var line in lines)
+                {
+                    if (string.IsNullOrWhiteSpace(line))
+                    {
+                        continue;
+                    }
+
+                    var firstColumn = line.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries).FirstOrDefault();
+                    if (string.IsNullOrWhiteSpace(firstColumn))
+                    {
+                        continue;
+                    }
+
+                    var normalizedId = firstColumn.Trim().Trim('"');
+                    if (string.Equals(normalizedId, "conversationid", StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(normalizedId, "callid", StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+
+                    ids.Add(normalizedId);
+                }
+            }
+
+            return ids;
         }
     }
 }
